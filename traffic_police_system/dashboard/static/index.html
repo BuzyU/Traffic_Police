@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Traffic Police AI — Computer Vision Monitoring System</title>
+  <meta name="description" content="Autonomous Computer Vision Traffic Monitoring, Vehicle Counting, Geometry Violations and Collision Assessment.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header class="app-header">
+    <div class="brand-section">
+      <div class="brand-badge">
+        <svg class="badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <path d="M9 12l2 2 4-4"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="brand-title">TRAFFIC POLICE AI</h1>
+        <p class="brand-subtitle">Autonomous Computer Vision & Tracking Engine</p>
+      </div>
+    </div>
+
+    <div class="system-status-pills">
+      <div class="status-pill active" id="pill-engine">
+        <span class="pulse-dot green"></span>
+        <span>CV Engine: Active</span>
+      </div>
+      <div class="status-pill" id="pill-hardware">
+        <span class="pulse-dot cyan"></span>
+        <span>RTX 3050 (6GB)</span>
+      </div>
+      <div class="status-pill dataset-pill">
+        <span>Dataset: Vehicles-COCO Multiclass</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Grid Layout -->
+  <main class="dashboard-grid">
+
+    <!-- Column 1: Live Stream & Calibration Controls -->
+    <section class="panel stream-panel">
+      <div class="panel-header">
+        <div class="header-left">
+          <h2 class="panel-title">LIVE SURVEILLANCE FEED</h2>
+          <span class="live-tag">LIVE</span>
+        </div>
+        <div class="header-actions">
+          <label class="upload-btn" for="video-upload-input" title="Upload video file">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Upload Feed</span>
+            <input type="file" id="video-upload-input" accept="video/*" style="display: none;">
+          </label>
+        </div>
+      </div>
+
+      <div class="video-container" id="video-wrapper">
+        <img id="stream-img" src="/api/stream" alt="Real-time Traffic Stream" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'640\' height=\'360\' viewBox=\'0 0 640 360\'><rect width=\'640\' height=\'360\' fill=\'%2311151c\'/><text x=\'50%25\' y=\'50%25\' fill=\'%2364748b\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-family=\'sans-serif\'>Feed Initializing / Standby</text></svg>'">
+        <canvas id="calibration-canvas"></canvas>
+      </div>
+
+      <!-- Calibration Toolbar -->
+      <div class="calibration-bar">
+        <div class="calib-desc">
+          <span class="mono-label">CALIBRATION TOOLS:</span>
+          <span id="calib-status-text">Select a line type and click 2 points on video</span>
+        </div>
+        <div class="calib-actions">
+          <button class="tool-btn" id="btn-draw-stopline">
+            <span class="dot red-dot"></span> Draw Stop Line
+          </button>
+          <button class="tool-btn" id="btn-draw-direction">
+            <span class="dot green-dot"></span> Draw Direction
+          </button>
+          <button class="tool-btn danger-btn" id="btn-clear-calib">Clear Lines</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Column 2: Counts HUD & Live Trend Chart -->
+    <section class="panel metrics-panel">
+      <div class="panel-header">
+        <h2 class="panel-title">VEHICLE CLASSIFICATION & COUNTS</h2>
+        <span class="model-badge">ResNet-18 (From Scratch)</span>
+      </div>
+
+      <!-- 4 Class Cards with EXACT Color Legend -->
+      <div class="count-cards-grid">
+        <div class="count-card card-car">
+          <div class="card-color-stripe yellow-stripe"></div>
+          <div class="card-body">
+            <div class="card-head">
+              <span class="class-name">CAR</span>
+              <span class="color-tag yellow-tag">Yellow Box</span>
+            </div>
+            <div class="count-value" id="count-car">0</div>
+          </div>
+        </div>
+
+        <div class="count-card card-motorcycle">
+          <div class="card-color-stripe blue-stripe"></div>
+          <div class="card-body">
+            <div class="card-head">
+              <span class="class-name">MOTORCYCLE / BIKE</span>
+              <span class="color-tag blue-tag">Blue Box</span>
+            </div>
+            <div class="count-value" id="count-motorcycle">0</div>
+          </div>
+        </div>
+
+        <div class="count-card card-bus">
+          <div class="card-color-stripe black-stripe"></div>
+          <div class="card-body">
+            <div class="card-head">
+              <span class="class-name">BUS</span>
+              <span class="color-tag black-tag">Black Box</span>
+            </div>
+            <div class="count-value" id="count-bus">0</div>
+          </div>
+        </div>
+
+        <div class="count-card card-truck">
+          <div class="card-color-stripe red-stripe"></div>
+          <div class="card-body">
+            <div class="card-head">
+              <span class="class-name">TRUCK</span>
+              <span class="color-tag red-tag">Red Box</span>
+            </div>
+            <div class="count-value" id="count-truck">0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Real-time Chart of Counts Over Time -->
+      <div class="chart-container">
+        <div class="chart-header">
+          <span class="chart-title">Real-Time Vehicle Density (Last 60 Updates)</span>
+          <span class="chart-legend-indicator">Real Tracking Log</span>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="countsChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Column 3: Violations Log & Incident Log -->
+    <section class="panel logs-panel">
+      <div class="panel-header">
+        <h2 class="panel-title">GEOMETRY-BASED VIOLATIONS</h2>
+        <span class="counter-badge" id="violations-count-badge">0 Logged</span>
+      </div>
+
+      <div class="table-container scrollable-log">
+        <table class="data-table" id="violations-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>ID</th>
+              <th>Type</th>
+              <th>Violation</th>
+              <th>Severity</th>
+            </tr>
+          </thead>
+          <tbody id="violations-tbody">
+            <tr class="empty-row">
+              <td colspan="5">No geometry violations detected yet. Set stop-line or direction above.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Column 4: Accident Assessment & Roadmapped Stubs -->
+    <section class="panel incidents-panel">
+      <div class="panel-header">
+        <div class="header-left">
+          <h2 class="panel-title">COLLISION & ACCIDENT HEURISTIC</h2>
+        </div>
+        <span class="disclaimer-badge" title="Heuristic estimate based on bounding-box overlap + deceleration">Geometric Heuristic</span>
+      </div>
+
+      <div class="heuristic-disclaimer-box">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <span>Computed via IoU bounding-box overlap (&gt;25%) + abrupt deceleration across frames. Not an ML accident classifier.</span>
+      </div>
+
+      <div class="table-container scrollable-log short-log">
+        <table class="data-table" id="accidents-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Vehicle 1</th>
+              <th>Vehicle 2</th>
+              <th>Overlap</th>
+              <th>Signal</th>
+            </tr>
+          </thead>
+          <tbody id="accidents-tbody">
+            <tr class="empty-row">
+              <td colspan="5">No collision events detected.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Explicit Blocked / Roadmap Features Section -->
+      <div class="stubs-section">
+        <div class="stubs-header">
+          <span class="stubs-title">UNAVAILABLE / ROADMAP FEATURES (EXPLICIT STUBS)</span>
+          <span class="lock-pill">Dataset Scope Locked</span>
+        </div>
+
+        <div class="stub-cards">
+          <!-- Emergency Vehicle Stub -->
+          <div class="stub-card disabled-card" onclick="showStubModal('emergency')">
+            <div class="stub-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <div class="stub-info">
+              <div class="stub-name">Emergency Vehicle Detection</div>
+              <div class="stub-status">Not Available — Requires ambulance/police/fire labels</div>
+            </div>
+            <span class="badge-coming-soon">Coming Soon</span>
+          </div>
+
+          <!-- Vehicle Model Recognition Stub -->
+          <div class="stub-card disabled-card" onclick="showStubModal('model')">
+            <div class="stub-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <div class="stub-info">
+              <div class="stub-name">Vehicle Model Recognition</div>
+              <div class="stub-status">Not Available — Requires fine-grained make/model dataset</div>
+            </div>
+            <span class="badge-coming-soon">Coming Soon</span>
+          </div>
+
+          <!-- Helmet Violation Stub -->
+          <div class="stub-card disabled-card" onclick="showStubModal('helmet')">
+            <div class="stub-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <div class="stub-info">
+              <div class="stub-name">Helmet Violation Detection</div>
+              <div class="stub-status">Not Available — Requires rider/helmet bounding box labels</div>
+            </div>
+            <span class="badge-coming-soon">Coming Soon</span>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Modal for Explaining Blocked Features -->
+  <div class="modal-overlay" id="stub-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-title">Feature Unavailable</h3>
+        <button class="close-btn" onclick="closeStubModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="modal-reason" class="modal-text"></p>
+        <div class="modal-requirement-box">
+          <strong>Required Data Format:</strong>
+          <p id="modal-req-format"></p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-action-btn" onclick="closeStubModal()">Understood</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

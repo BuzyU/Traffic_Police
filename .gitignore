@@ -1,6 +1,8 @@
 venv/
+**/venv/
 __pycache__/
 *.pyc
-.git/
+traffic_police_system/site_pkgs/
+**/site_pkgs/
 .env
 .vscode/

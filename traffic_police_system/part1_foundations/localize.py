@@ -29,13 +29,9 @@ import torch.nn as nn
 from torchvision import transforms
 from PIL import Image
 
-# Color mapping in BGR for OpenCV drawing
-CLASS_COLORS_BGR = {
-    "truck":      (30, 30, 220),    # Red
-    "motorcycle": (255, 100, 30),   # Blue
-    "bus":        (0, 0, 0),        # Black
-    "car":        (0, 220, 255),    # Yellow
-}
+# Import shared colour constants from central config.
+# The authoritative definitions live in traffic_police_system/config.py.
+from config import CLASS_COLORS_BGR, CLASS_TEXT_COLORS  # noqa: F401 (re-exported)
 
 CLASSES = ["bus", "car", "motorcycle", "truck"]
 
@@ -190,16 +186,15 @@ class VehiclePipeline:
                 # Draw bounding box
                 cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
 
-                # Draw label badge with background
+                # Draw label badge — clamp so badge never goes above y=0
                 label = f"{cls_name.capitalize()} {conf:.2f}"
-                (lw, lh), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                
-                y_text = y - (lh + 6) * i
-                cv2.rectangle(annotated, (x, y_text - lh - 6), (x + lw + 6, y_text), color, -1)
-                
-                # Text color: white if box is dark, black if bright
-                text_color = (255, 255, 255) if cls_name in ["bus", "motorcycle"] else (0, 0, 0)
-                cv2.putText(annotated, label, (x + 3, y_text - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1, cv2.LINE_AA)
+                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                badge_top    = max(0, y - (lh + 6) * (i + 1))
+                badge_bottom = badge_top + lh + 6
+                cv2.rectangle(annotated, (x, badge_top), (x + lw + 6, badge_bottom), color, -1)
+                text_color = CLASS_TEXT_COLORS.get(cls_name, (255, 255, 255))
+                cv2.putText(annotated, label, (x + 3, badge_bottom - 3),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1, cv2.LINE_AA)
 
                 detections.append({
                     "box": [int(x), int(y), int(w), int(h)],
@@ -214,25 +209,21 @@ class VehiclePipeline:
         return annotated, detections, counts
 
     def _draw_stats_overlay(self, frame: np.ndarray, counts: Dict[str, int]):
-        """Draw a dashboard legend & running count overlay on the frame."""
+        """Draw a semi-transparent HUD in the top-left corner of the frame."""
+        # FIX: draw rectangle on overlay copy first, THEN blend into frame.
         overlay = frame.copy()
-        h, w = frame.shape[:2]
-        
-        # Top-left HUD card
-        cv2.rectangle(overlay, (10, 10), (220, 140), (20, 24, 30), -1)
+        cv2.rectangle(overlay, (10, 10), (220, 145), (20, 24, 30), -1)
         cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
-        cv2.putText(frame, "REAL-TIME VEHICLE COUNTS", (18, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(frame, "VEHICLE COUNTS (THIS FRAME)", (18, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1, cv2.LINE_AA)
 
         y_offset = 50
         for cls_name in ["car", "motorcycle", "bus", "truck"]:
             color = CLASS_COLORS_BGR[cls_name]
-            cnt = counts[cls_name]
-            # Color badge
+            cnt   = counts.get(cls_name, 0)
             cv2.rectangle(frame, (18, y_offset - 10), (32, y_offset + 2), color, -1)
-            cv2.rectangle(frame, (18, y_offset - 10), (32, y_offset + 2), (255, 255, 255), 1)
-            # Text
-            text = f"{cls_name.capitalize()}: {cnt}"
-            cv2.putText(frame, text, (40, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
+            cv2.rectangle(frame, (18, y_offset - 10), (32, y_offset + 2), (160, 160, 160), 1)
+            cv2.putText(frame, f"{cls_name.capitalize()}: {cnt}",
+                        (40, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
             y_offset += 22

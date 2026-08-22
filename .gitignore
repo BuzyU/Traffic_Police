@@ -1,8 +1,15 @@
 venv/
 **/venv/
+fresh_env/
+**/fresh_env/
 __pycache__/
 *.pyc
 traffic_police_system/site_pkgs/
 **/site_pkgs/
+runs/
+**/runs/
+*.pt
+*.zip
+traffic_police_system/dashboard/uploads/
 .env
 .vscode/

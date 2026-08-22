@@ -140,10 +140,10 @@ class VehiclePipeline:
         self.localizer = ClassicalLocalizer(mode=mode)
 
     @torch.no_grad()
-    def classify_crop(self, crop: np.ndarray) -> Tuple[str, float, Dict[str, float]]:
-        """Classify cropped vehicle image with the trained model."""
+    def classify_crop(self, crop: np.ndarray, conf_thresh: float = 0.35) -> List[Tuple[str, float]]:
+        """Classify cropped vehicle image with the trained model, returning all classes above threshold."""
         if self.model is None:
-            return "car", 1.0, {"car": 1.0, "bus": 0.0, "motorcycle": 0.0, "truck": 0.0}
+            return [("car", 1.0)]
 
         rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_crop)
@@ -152,12 +152,17 @@ class VehiclePipeline:
         logits = self.model(tensor)
         probs = torch.sigmoid(logits)[0].cpu().numpy()
 
-        prob_dict = {CLASSES[i]: float(probs[i]) for i in range(len(CLASSES))}
-        best_idx = int(np.argmax(probs))
-        best_class = CLASSES[best_idx]
-        best_prob = float(probs[best_idx])
+        results = []
+        for i, cls in enumerate(CLASSES):
+            if probs[i] >= conf_thresh:
+                results.append((cls, float(probs[i])))
+                
+        # Fallback if nothing clears threshold: take the argmax
+        if not results:
+            best_idx = int(np.argmax(probs))
+            results.append((CLASSES[best_idx], float(probs[best_idx])))
 
-        return best_class, best_prob, prob_dict
+        return results
 
     def process_frame(self, frame: np.ndarray, conf_thresh: float = 0.3) -> Tuple[np.ndarray, List[Dict[str, Any]], Dict[str, int]]:
         """
@@ -177,8 +182,8 @@ class VehiclePipeline:
             if crop.shape[0] < 10 or crop.shape[1] < 10:
                 continue
 
-            cls_name, conf, _ = self.classify_crop(crop)
-            if conf >= conf_thresh:
+            detected_classes = self.classify_crop(crop, conf_thresh=conf_thresh)
+            for i, (cls_name, conf) in enumerate(detected_classes):
                 counts[cls_name] += 1
                 color = CLASS_COLORS_BGR.get(cls_name, (0, 255, 0))
 
@@ -188,11 +193,13 @@ class VehiclePipeline:
                 # Draw label badge with background
                 label = f"{cls_name.capitalize()} {conf:.2f}"
                 (lw, lh), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(annotated, (x, y - lh - 6), (x + lw + 6, y), color, -1)
+                
+                y_text = y - (lh + 6) * i
+                cv2.rectangle(annotated, (x, y_text - lh - 6), (x + lw + 6, y_text), color, -1)
                 
                 # Text color: white if box is dark, black if bright
                 text_color = (255, 255, 255) if cls_name in ["bus", "motorcycle"] else (0, 0, 0)
-                cv2.putText(annotated, label, (x + 3, y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1, cv2.LINE_AA)
+                cv2.putText(annotated, label, (x + 3, y_text - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1, cv2.LINE_AA)
 
                 detections.append({
                     "box": [int(x), int(y), int(w), int(h)],

@@ -169,6 +169,87 @@ def train(args):
 
     print("\nSimCLR pretraining complete!")
     print(f"Backbone weights: {CKPT_DIR / 'simclr_backbone.pth'}")
+    
+    # Run linear probe validation
+    validate_linear_probe(device, args.batch, args.workers)
+
+
+def validate_linear_probe(device, batch_size, workers):
+    print("\n" + "="*60)
+    print("Running Linear Probe Validation...")
+    from part1_foundations.dataset import get_dataloader, get_pos_weights, NUM_CLASSES, CLASSES
+    
+    train_loader = get_dataloader("train", batch_size=batch_size, num_workers=workers, img_size=224)
+    val_loader = get_dataloader("valid", batch_size=batch_size*2, num_workers=workers, img_size=224)
+    
+    # Load backbone and freeze it
+    backbone_path = CKPT_DIR / "simclr_backbone.pth"
+    model = resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
+    state = torch.load(backbone_path, map_location="cpu")
+    model.load_state_dict(state, strict=False)
+    
+    for name, param in model.named_parameters():
+        if "fc" not in name:
+            param.requires_grad = False
+            
+    model = model.to(device)
+    pos_weights = get_pos_weights("train", device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weights)
+    optimizer = torch.optim.Adam(model.fc.parameters(), lr=1e-3)
+    
+    # Train linear head for 5 epochs
+    epochs = 5
+    for epoch in range(epochs):
+        model.train()
+        for imgs, labels in tqdm(train_loader, desc=f"Linear Probe Epoch {epoch+1}/{epochs}", leave=False):
+            imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            optimizer.zero_grad()
+            with autocast(enabled=(device.type == "cuda")):
+                logits = model(imgs)
+                loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
+            
+    # Evaluate
+    model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            imgs = imgs.to(device, non_blocking=True)
+            with autocast(enabled=(device.type == "cuda")):
+                logits = model(imgs)
+            preds = (torch.sigmoid(logits).cpu() >= 0.5).float()
+            all_preds.append(preds)
+            all_labels.append(labels)
+            
+    preds_np = torch.cat(all_preds).numpy()
+    labels_np = torch.cat(all_labels).numpy()
+    
+    print("\nLinear Probe Validation Results (threshold=0.5):")
+    f1_scores = []
+    for i, cls in enumerate(CLASSES):
+        tp = ((preds_np[:, i] == 1) & (labels_np[:, i] == 1)).sum()
+        fp = ((preds_np[:, i] == 1) & (labels_np[:, i] == 0)).sum()
+        fn = ((preds_np[:, i] == 0) & (labels_np[:, i] == 1)).sum()
+        p = tp / max(tp + fp, 1)
+        r = tp / max(tp + fn, 1)
+        f1 = 2 * p * r / max(p + r, 1e-8)
+        f1_scores.append(f1)
+        print(f"  {cls:<12} P={p:.3f}  R={r:.3f}  F1={f1:.3f}")
+        
+    mAP = np.mean(f1_scores)
+    # Estimate accuracy via mean exact match ratio
+    exact_match = (preds_np == labels_np).all(axis=1).mean()
+    print(f"\n  Mean F1 (mAP): {mAP:.4f}")
+    print(f"  Exact Match Accuracy: {exact_match:.4f}")
+    
+    if mAP < 0.30:
+        print("\n  [WARNING] SimCLR representation seems collapsed (mAP < 30%).")
+        print("  Check learning rate, batch size, or try restarting pretraining.")
+    else:
+        print("\n  [OK] Linear probe indicates healthy representations.")
+    print("="*60 + "\n")
 
 
 if __name__ == "__main__":

@@ -129,3 +129,57 @@ class CentroidTracker:
             self.next_id, det["box"], det["class"], det["conf"], det["color"]
         )
         self.next_id += 1
+
+
+class YOLOTrackerWrapper:
+    """
+    Wraps Ultralytics YOLO tracking results into the existing TrackedVehicle format,
+    maintaining the history and velocity vectors required by the ViolationEngine.
+    """
+    def __init__(self, max_disappeared: int = 30):
+        self.objects: Dict[int, TrackedVehicle] = {}
+        self.max_disappeared = max_disappeared
+
+    def update(self, yolo_results, frame_num: int, class_names: Dict[int, str], class_colors: Dict[str, Tuple[int, int, int]]) -> Dict[int, TrackedVehicle]:
+        if not yolo_results or not yolo_results[0].boxes or yolo_results[0].boxes.id is None:
+            # Mark all as disappeared if no tracks
+            for obj_id in list(self.objects.keys()):
+                self.objects[obj_id].disappeared += 1
+                if self.objects[obj_id].disappeared > self.max_disappeared:
+                    del self.objects[obj_id]
+            return self.objects
+
+        boxes = yolo_results[0].boxes
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        cls_ids = boxes.cls.cpu().numpy()
+        track_ids = boxes.id.cpu().numpy().astype(int)
+
+        current_ids = set()
+
+        for i in range(len(track_ids)):
+            tid = track_ids[i]
+            current_ids.add(tid)
+            c_id = int(cls_ids[i])
+            c_name = class_names.get(c_id, "car")
+            c_conf = float(conf[i])
+            x1, y1, x2, y2 = map(int, xyxy[i])
+            w = x2 - x1
+            h = y2 - y1
+            box_lst = [x1, y1, w, h]
+            color = class_colors.get(c_name, (0, 255, 0))
+
+            if tid in self.objects:
+                self.objects[tid].update(box_lst, c_name, c_conf, frame_num)
+            else:
+                # Register new
+                self.objects[tid] = TrackedVehicle(tid, box_lst, c_name, c_conf, color)
+
+        # Mark unmatched as disappeared
+        for obj_id in list(self.objects.keys()):
+            if obj_id not in current_ids:
+                self.objects[obj_id].disappeared += 1
+                if self.objects[obj_id].disappeared > self.max_disappeared:
+                    del self.objects[obj_id]
+
+        return self.objects

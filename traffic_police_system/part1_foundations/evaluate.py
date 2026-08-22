@@ -36,41 +36,54 @@ CKPT_DIR = Path(__file__).parent.parent / "checkpoints"
 # ─── Test-Time Augmentation ───────────────────────────────────────────────────
 
 @torch.no_grad()
-def predict_tta(model, loader, device, n_views: int = 5, threshold: float = 0.5):
+def predict_tta(model, loader, device, n_views: int = 5, thresholds: list = None):
     """Average predictions over n_views augmented versions of each image."""
     model.eval()
-    all_preds, all_labels = [], []
+    if thresholds is None:
+        thresholds = [0.5] * NUM_CLASSES
+    threshold_tensor = torch.tensor(thresholds).float()
 
-    for imgs, labels in tqdm(loader, desc="TTA inference", leave=False):
-        # imgs is the base-transform version; re-augment n_views times
-        B = imgs.size(0)
-        probs_accum = torch.zeros(B, NUM_CLASSES)
+    dataset_size = len(loader.dataset)
+    all_probs = torch.zeros(dataset_size, NUM_CLASSES)
+    all_labels = []
 
-        with autocast(enabled=(device.type == "cuda")):
-            for _ in range(n_views):
-                logits = model(imgs.to(device, non_blocking=True))
-                probs  = torch.sigmoid(logits).cpu()
-                probs_accum += probs
+    for view in range(n_views):
+        idx = 0
+        is_first_view = (view == 0)
+        for imgs, labels in tqdm(loader, desc=f"TTA inference view {view+1}/{n_views}", leave=False):
+            imgs = imgs.to(device, non_blocking=True)
+            B = imgs.size(0)
 
-        avg_probs = probs_accum / n_views
-        preds = (avg_probs >= threshold).float()
-        all_preds.append(preds)
-        all_labels.append(labels)
+            with autocast(enabled=(device.type == "cuda")):
+                logits = model(imgs)
+                probs = torch.sigmoid(logits).cpu()
 
-    preds_np  = torch.cat(all_preds).numpy()
+            all_probs[idx:idx+B] += probs
+            if is_first_view:
+                all_labels.append(labels)
+            idx += B
+
+    avg_probs = all_probs / n_views
+    preds = (avg_probs >= threshold_tensor).float()
+
+    preds_np = preds.numpy()
     labels_np = torch.cat(all_labels).numpy()
     return preds_np, labels_np
 
 
 @torch.no_grad()
-def predict_standard(model, loader, device, threshold: float = 0.5):
+def predict_standard(model, loader, device, thresholds: list = None):
     model.eval()
+    if thresholds is None:
+        thresholds = [0.5] * NUM_CLASSES
+    threshold_tensor = torch.tensor(thresholds).float()
+
     all_preds, all_labels = [], []
     for imgs, labels in tqdm(loader, desc="Inference", leave=False):
         imgs = imgs.to(device, non_blocking=True)
         with autocast(enabled=(device.type == "cuda")):
             logits = model(imgs)
-        preds = (torch.sigmoid(logits).cpu() >= threshold).float()
+        preds = (torch.sigmoid(logits).cpu() >= threshold_tensor).float()
         all_preds.append(preds)
         all_labels.append(labels)
     return torch.cat(all_preds).numpy(), torch.cat(all_labels).numpy()
@@ -138,6 +151,23 @@ def print_table(scratch_results, scratch_mAP, pretrained_results, pretrained_mAP
     print("=" * W)
 
 
+def print_confusion_matrix(preds_np, labels_np):
+    print("  CONFUSION MATRIX (Multi-label co-occurrence)")
+    print(f"  {'Pred \\ True':<15}", end="")
+    for cls in CLASSES:
+        print(f"{cls:>12}", end="")
+    print("\n  " + "-" * (15 + 12 * NUM_CLASSES))
+
+    for i, pred_cls in enumerate(CLASSES):
+        print(f"  {pred_cls:<15}", end="")
+        for j, true_cls in enumerate(CLASSES):
+            # Count where pred is 1 and true is 1
+            count = ((preds_np[:, i] == 1) & (labels_np[:, j] == 1)).sum()
+            print(f"{int(count):>12}", end="")
+        print()
+    print("=" * 78)
+
+
 def run_evaluation(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Evaluating on '{args.split}' split  |  TTA={args.tta}")
@@ -158,10 +188,11 @@ def run_evaluation(args):
     scratch_model, scratch_ckpt = load_scratch_model(device)
     if scratch_model:
         print("Evaluating FROM-SCRATCH model...")
+        thresholds = scratch_ckpt.get("thresholds", None)
         if args.tta:
-            preds, labels = predict_tta(scratch_model, loader, device, n_views=5)
+            preds, labels = predict_tta(scratch_model, loader, device, n_views=5, thresholds=thresholds)
         else:
-            preds, labels = predict_standard(scratch_model, loader, device)
+            preds, labels = predict_standard(scratch_model, loader, device, thresholds=thresholds)
         scratch_results, scratch_mAP = compute_metrics(preds, labels)
         print(f"  Scratch model  mAP (mean-F1) = {scratch_mAP:.4f}")
     else:
@@ -171,10 +202,11 @@ def run_evaluation(args):
     pretrained_model, pretrained_ckpt = load_pretrained_model(device)
     if pretrained_model:
         print("Evaluating PRETRAINED BASELINE model...")
+        thresholds = pretrained_ckpt.get("thresholds", None)
         if args.tta:
-            preds, labels = predict_tta(pretrained_model, loader, device, n_views=5)
+            preds, labels = predict_tta(pretrained_model, loader, device, n_views=5, thresholds=thresholds)
         else:
-            preds, labels = predict_standard(pretrained_model, loader, device)
+            preds, labels = predict_standard(pretrained_model, loader, device, thresholds=thresholds)
         pretrained_results, pretrained_mAP = compute_metrics(preds, labels)
         print(f"  Pretrained model mAP (mean-F1) = {pretrained_mAP:.4f}")
     else:
@@ -182,6 +214,10 @@ def run_evaluation(args):
 
     print()
     print_table(scratch_results, scratch_mAP, pretrained_results, pretrained_mAP)
+    if scratch_results is not None:
+        print()
+        print("Scratch Model Confusion Matrix:")
+        print_confusion_matrix(preds, labels)
 
     if scratch_mAP and pretrained_mAP:
         gap = pretrained_mAP - scratch_mAP

@@ -23,6 +23,12 @@ class DashboardState:
             self.processor = VideoProcessor(video_source=source)
             self.processor.start()
 
+    def get_source_status(self) -> str:
+        if self.processor is None:
+            return "initializing"
+        with self.processor.lock:
+            return getattr(self.processor, "source_status", "initializing")
+
     def get_counts(self) -> Dict[str, Any]:
         if self.processor is None:
             return {"car": 0, "motorcycle": 0, "bus": 0, "truck": 0, "active_tracked": 0}

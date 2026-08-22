@@ -16,14 +16,24 @@ import torch
 from pathlib import Path
 import threading
 import time
-
-from part1_foundations.localize import VehiclePipeline, CLASS_COLORS_BGR
-from part1_foundations.train_scratch import build_model
-from part2_detection.tracker import CentroidTracker
+import os
+from part1_foundations.localize import CLASS_COLORS_BGR
+from part2_detection.tracker import YOLOTrackerWrapper
 from part2_detection.violations import ViolationEngine
 from part3_advanced.accident_detector import AccidentDetector
 
+# Set YOLO config dir to avoid AppData permissions
+os.environ["YOLO_CONFIG_DIR"] = str(Path(__file__).parent.parent / "runs" / "config")
+from ultralytics import YOLO
+
 CKPT_DIR = Path(__file__).parent.parent / "checkpoints"
+
+YOLO_CLASS_NAMES = {
+    0: "bus",
+    1: "car",
+    2: "motorcycle",
+    3: "truck"
+}
 
 
 class VideoProcessor:
@@ -34,10 +44,15 @@ class VideoProcessor:
         device: Optional[torch.device] = None,
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = self._load_model(model_path)
+        
+        yolo_path = model_path or (CKPT_DIR / "best.pt")
+        if not yolo_path.exists():
+            print(f"[VideoProcessor] WARNING: Trained YOLO model not found at {yolo_path}, falling back to yolov8n.pt")
+            self.model = YOLO("yolov8n.pt")
+        else:
+            self.model = YOLO(str(yolo_path))
 
-        self.pipeline = VehiclePipeline(model=self.model, device=self.device, mode="video")
-        self.tracker = CentroidTracker(max_disappeared=25, max_distance=120.0)
+        self.tracker = YOLOTrackerWrapper(max_disappeared=25)
         self.violations_engine = ViolationEngine()
         self.accident_detector = AccidentDetector()
 
@@ -48,6 +63,7 @@ class VideoProcessor:
         self.current_frame_raw: Optional[np.ndarray] = None
         self.current_frame_annotated: Optional[np.ndarray] = None
         self.frame_number = 0
+        self.source_status = "initializing"
 
         # Real-time state
         self.latest_counts = {"car": 0, "motorcycle": 0, "bus": 0, "truck": 0}
@@ -55,21 +71,6 @@ class VideoProcessor:
         self.counts_timeline: List[Dict[str, Any]] = []
 
         self.lock = threading.Lock()
-
-    def _load_model(self, model_path: Optional[Path]) -> torch.nn.Module:
-        model = build_model(simclr_backbone_path=None).to(self.device)
-        path = model_path or (CKPT_DIR / "scratch_best.pth")
-        if not path.exists():
-            path = CKPT_DIR / "pretrained_best.pth"
-
-        if path.exists():
-            print(f"[VideoProcessor] Loading model: {path}")
-            ckpt = torch.load(path, map_location=self.device)
-            model.load_state_dict(ckpt["model"])
-        else:
-            print("[VideoProcessor] Notice: No checkpoint found, using initial model weights for pipeline structure.")
-        model.eval()
-        return model
 
     def set_calibration(self, stop_line=None, allowed_direction=None):
         with self.lock:
@@ -81,6 +82,15 @@ class VideoProcessor:
     def start(self):
         self.is_running = True
         self.cap = cv2.VideoCapture(self.video_source)
+        if not self.cap.isOpened():
+            with self.lock:
+                self.source_status = f"error: cannot open source '{self.video_source}'"
+            self.is_running = False
+            return
+        
+        with self.lock:
+            self.source_status = "ok"
+            
         thread = threading.Thread(target=self._process_loop, daemon=True)
         thread.start()
 
@@ -92,6 +102,8 @@ class VideoProcessor:
     def _process_loop(self):
         fps_target = 30.0
         frame_interval = 1.0 / fps_target
+        
+        last_t = time.time()
 
         while self.is_running and self.cap and self.cap.isOpened():
             t_start = time.time()
@@ -107,6 +119,10 @@ class VideoProcessor:
             self.frame_number += 1
             annotated_frame = self.process_single_frame(frame, self.frame_number)
 
+            t_end = time.time()
+            self.current_fps = 1.0 / max((t_end - last_t), 1e-4)
+            last_t = t_end
+
             with self.lock:
                 self.current_frame_raw = frame
                 self.current_frame_annotated = annotated_frame
@@ -116,28 +132,23 @@ class VideoProcessor:
             time.sleep(sleep_time)
 
     def process_single_frame(self, frame: np.ndarray, frame_num: int) -> np.ndarray:
-        # 1. Candidate region extraction + classification
-        candidate_boxes = self.pipeline.localizer.extract_candidate_regions(frame)
-        detections = []
+        # 1. YOLO inference + tracking
+        results = self.model.track(
+            frame, 
+            persist=True, 
+            conf=0.25, 
+            verbose=False, 
+            device=0 if self.device.type == "cuda" else "cpu"
+        )
+        
         raw_counts = {"car": 0, "motorcycle": 0, "bus": 0, "truck": 0}
+        if results and results[0].boxes:
+            for cls_id in results[0].boxes.cls.cpu().numpy():
+                c_name = YOLO_CLASS_NAMES.get(int(cls_id), "car")
+                raw_counts[c_name] += 1
 
-        for (x, y, w, h) in candidate_boxes:
-            crop = frame[y:y+h, x:x+w]
-            if crop.shape[0] < 10 or crop.shape[1] < 10:
-                continue
-            cls_name, conf, _ = self.pipeline.classify_crop(crop)
-            if conf >= 0.25:
-                raw_counts[cls_name] += 1
-                color = CLASS_COLORS_BGR.get(cls_name, (0, 220, 255))
-                detections.append({
-                    "box": [int(x), int(y), int(w), int(h)],
-                    "class": cls_name,
-                    "conf": float(conf),
-                    "color": color
-                })
-
-        # 2. Update tracking
-        tracked_vehicles = self.tracker.update(detections, frame_num)
+        # 2. Update tracking wrapper
+        tracked_vehicles = self.tracker.update(results, frame_num, YOLO_CLASS_NAMES, CLASS_COLORS_BGR)
 
         # 3. Check violations
         new_violations = self.violations_engine.check_violations(tracked_vehicles, frame_num)
@@ -184,9 +195,33 @@ class VideoProcessor:
                 if len(self.counts_timeline) > 100:
                     self.counts_timeline.pop(0)
 
-        self.pipeline._draw_stats_overlay(annotated, raw_counts)
+        self._draw_stats_overlay(annotated, raw_counts)
 
         return annotated
+
+    def _draw_stats_overlay(self, frame: np.ndarray, counts: Dict[str, int]):
+        """Draw a dashboard legend & running count overlay on the frame."""
+        overlay = frame.copy()
+        h, w = frame.shape[:2]
+        
+        # Top-left HUD card
+        cv2.rectangle(overlay, (10, 10), (220, 140), (20, 24, 30), -1)
+        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+
+        cv2.putText(frame, "REAL-TIME VEHICLE COUNTS", (18, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+
+        y_offset = 50
+        for cls_name in ["car", "motorcycle", "bus", "truck"]:
+            color = CLASS_COLORS_BGR[cls_name]
+            cnt = counts[cls_name]
+            # Color badge
+            cv2.rectangle(frame, (18, y_offset - 10), (32, y_offset + 2), color, -1)
+            cv2.rectangle(frame, (18, y_offset - 10), (32, y_offset + 2), (255, 255, 255), 1)
+            # Text
+            text = f"{cls_name.capitalize()}: {cnt}"
+            cv2.putText(frame, text, (40, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
+            y_offset += 22
 
     def get_jpeg_frame(self) -> Optional[bytes]:
         with self.lock:

@@ -82,18 +82,71 @@ def get_scheduler(optimizer, epochs: int, warmup: int = 5):
         return 0.5 * (1.0 + np.cos(np.pi * progress))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+class EarlyStopper:
+    def __init__(self, patience=10):
+        self.patience = patience
+        self.counter = 0
+        self.best_score = None
+
+    def __call__(self, score):
+        if self.best_score is None or score > self.best_score:
+            self.best_score = score
+            self.counter = 0
+            return False
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
 
 # ─── Evaluation ───────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def evaluate(model, loader, device, threshold=0.5):
+def calibrate_thresholds(model, loader, device):
     model.eval()
+    all_probs, all_labels = [], []
+    for imgs, labels in loader:
+        imgs = imgs.to(device, non_blocking=True)
+        with autocast(enabled=(device.type == "cuda")):
+            logits = model(imgs)
+        probs = torch.sigmoid(logits).cpu()
+        all_probs.append(probs)
+        all_labels.append(labels)
+        
+    probs_np = torch.cat(all_probs).numpy()
+    labels_np = torch.cat(all_labels).numpy()
+    
+    best_thresholds = [0.5] * NUM_CLASSES
+    for i, cls in enumerate(CLASSES):
+        best_f1 = 0
+        best_t = 0.5
+        for t in np.arange(0.1, 0.95, 0.05):
+            preds = (probs_np[:, i] >= t).astype(float)
+            tp = ((preds == 1) & (labels_np[:, i] == 1)).sum()
+            fp = ((preds == 1) & (labels_np[:, i] == 0)).sum()
+            fn = ((preds == 0) & (labels_np[:, i] == 1)).sum()
+            p = tp / max(tp + fp, 1)
+            r = tp / max(tp + fn, 1)
+            f1 = 2 * p * r / max(p + r, 1e-8)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_t = t
+        best_thresholds[i] = float(best_t)
+    return best_thresholds
+
+@torch.no_grad()
+def evaluate(model, loader, device, thresholds=None):
+    model.eval()
+    if thresholds is None:
+        thresholds = [0.5] * NUM_CLASSES
+    threshold_tensor = torch.tensor(thresholds).float()
     all_preds, all_labels = [], []
     for imgs, labels in loader:
         imgs = imgs.to(device, non_blocking=True)
         with autocast(enabled=(device.type == "cuda")):
             logits = model(imgs)
-        preds = (torch.sigmoid(logits).cpu() >= threshold).float()
+        preds = (torch.sigmoid(logits).cpu() >= threshold_tensor).float()
         all_preds.append(preds)
         all_labels.append(labels)
 
@@ -155,6 +208,8 @@ def train(args):
         best_mAP = ckpt.get("best_mAP", 0.0)
         print(f"Resumed from epoch {resume_epoch}, best_mAP={best_mAP:.4f}")
 
+    early_stopper = EarlyStopper(patience=args.patience)
+
     GRAD_ACCUM = 2  # effective batch = args.batch * 2 = 128
 
     print(f"\nTraining from-scratch ResNet-18: {args.epochs} epochs, "
@@ -202,7 +257,8 @@ def train(args):
 
         # Validate every 2 epochs
         if (epoch + 1) % 2 == 0 or (epoch + 1) == args.epochs:
-            val_results, val_mAP = evaluate(model, val_loader, device)
+            thresholds = calibrate_thresholds(model, val_loader, device)
+            val_results, val_mAP = evaluate(model, val_loader, device, thresholds=thresholds)
             elapsed = time.time() - t0
             lr_now  = scheduler.get_last_lr()[0]
             mem_mb  = torch.cuda.max_memory_allocated() / 1e6 if device.type == "cuda" else 0
@@ -214,8 +270,9 @@ def train(args):
                   f"time={elapsed:.1f}s  "
                   f"VRAM={mem_mb:.0f}MB")
 
-            for cls, m in val_results.items():
-                print(f"  {cls:<12} P={m['precision']:.3f}  R={m['recall']:.3f}  F1={m['f1']:.3f}")
+            for i, cls in enumerate(CLASSES):
+                m = val_results[cls]
+                print(f"  {cls:<12} (thr={thresholds[i]:.2f}) P={m['precision']:.3f}  R={m['recall']:.3f}  F1={m['f1']:.3f}")
 
             # Save best
             if val_mAP > best_mAP:
@@ -226,8 +283,13 @@ def train(args):
                     "val_results": val_results,
                     "val_mAP": val_mAP,
                     "best_mAP": best_mAP,
+                    "thresholds": thresholds,
                 }, CKPT_DIR / "scratch_best.pth")
                 print(f"  [OK] New best! scratch_best.pth (mAP={best_mAP:.4f})")
+                
+            if early_stopper(val_mAP):
+                print(f"Early stopping triggered at epoch {epoch+1}.")
+                break
         else:
             elapsed = time.time() - t0
             print(f"Epoch {epoch+1:>3}/{args.epochs}  loss={avg_loss:.4f}  "
@@ -241,6 +303,7 @@ def train(args):
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "best_mAP": best_mAP,
+                "thresholds": thresholds if 'thresholds' in locals() else [0.5]*NUM_CLASSES,
             }, latest_path)
 
     print(f"\nTraining complete! Best val mAP: {best_mAP:.4f}")
@@ -253,5 +316,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch",   type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--fresh",   action="store_true", help="Ignore existing checkpoint")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     args = parser.parse_args()
     train(args)
